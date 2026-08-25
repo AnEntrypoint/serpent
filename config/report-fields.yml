@@ -1,0 +1,60 @@
+# serpent/config/report-fields.yml -- the DEFAULT generic experiment-tracking
+# field vocabulary, used when a research_run row's own `schema` blob (see
+# thatcher.config.yml) is unset. Minimal by design (user's own instruction:
+# no over-specific fields) -- a real run can declare its own richer schema
+# per-row via src/run-schema.js's resolver; this file is only the fallback.
+
+entity_label: run
+enquiry_headline_fields: [method, status]
+tool_name: case_report
+tool_description: >-
+  Record what you have learned about this research run, one field at a time,
+  as the researcher gives it. Pass ONLY the fields you actually learned this
+  turn -- they merge into the running record, so you never lose earlier facts
+  and never need to repeat a field the researcher already gave. Leave a field
+  out if you do not know it yet; do not guess.
+
+fields:
+  - key: hypothesis
+    description: "What the researcher is testing or expects to find, in their own words."
+    critical_for_visit: true
+    display_label: Hypothesis
+    section: Run detail
+  - key: method
+    description: "How the run is being conducted: the approach, procedure, or protocol."
+    critical_for_visit: true
+    display_label: Method
+    section: Run detail
+  - key: dataset_or_sample
+    description: "What data or sample this run works with -- a dataset name, a sample id, a source description."
+    display_label: Dataset / sample
+    section: Run detail
+  - key: result
+    description: "What was found or produced, ONLY once the researcher actually reports an outcome. Leave out while the run is still in progress; do not guess or extrapolate."
+    never_inferred: true
+    never_inferred_guard_pattern: "ONLY once the researcher actually reports"
+    display_label: Result
+    section: Run detail
+  - key: status
+    description: "The researcher's own stated status for the run (planned, running, done, failed), ONLY if they say so -- do not infer from other fields."
+    display_label: Status
+    section: Run detail
+  - key: researcher
+    description: "Who is running this, if not already known from the contact."
+    display_label: Researcher
+    section: Attribution
+  - key: notes
+    description: "Anything else worth recording."
+    display_label: Other notes
+    section: Notes & media
+  - key: photos
+    description: "Note that the researcher sent a photo (set to a short description). Each call ADDS a new photo note -- if more than one photo arrives, call again with a description of the new one; earlier descriptions are kept, never overwritten."
+    append: true
+    display_label: Photos
+    section: Notes & media
+
+geo_fields:
+  - key: lat
+    description: "Latitude of the run's site, if relevant (field research) and the researcher names a place you can identify. Leave out if not applicable or the place cannot be identified."
+  - key: lon
+    description: "Longitude, alongside lat."

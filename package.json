@@ -1,0 +1,20 @@
+{
+  "name": "serpent",
+  "version": "1.0.0",
+  "description": "casey, pre-configured for dynamic multi-run research tracking -- runtime-dynamic per-run schemas, a notes-folder + on-demand consolidation research workflow.",
+  "type": "module",
+  "bin": {
+    "serpent": "./bin/serpent.js"
+  },
+  "scripts": {
+    "start": "node ./bin/serpent.js up"
+  },
+  "dependencies": {
+    "casey": "github:AnEntrypoint/casey#main",
+    "freddie": "github:AnEntrypoint/freddie#main",
+    "js-yaml": "^4.3.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -15,7 +15,7 @@
 //     per bin/worker.js's CASEY_EXTRA_DASHBOARD_ROUTES contract) -- no
 //     duplicate session-cookie-parsing code path
 //
-// Three concerns live here, none of which belong in casey's own core:
+// Four concerns live here, none of which belong in casey's own core:
 //   1. Admin-only run-schema setting (security boundary: never agent-facing,
 //      never plain-operator-facing -- matches AGENTS.md's tier-is-operator-
 //      assigned invariant this extends).
@@ -25,6 +25,9 @@
 //      process-wide one).
 //   3. The on-demand consolidation trigger (freddie's research_consolidate,
 //      wrapping the result back into the run's own report/summary).
+//   4. The on-demand web-research trigger (freddie's real web_search/
+//      web_fetch primitives -- see the /research route below for why this
+//      is NOT the same thing as gm's own oxibrowser/CDP session tooling).
 
 import { SYSTEM_USER } from 'casey/src/case-store.js'
 import { resolveRunSchema, validateSchemaBlob } from './run-schema.js'
@@ -63,6 +66,40 @@ export default function mount(app, { store }) {
     console.error('[serpent dashboard-routes]', req.method, req.path, e && e.stack || e)
     if (!res.headersSent) res.status(500).json({ error: 'internal error' })
   })
+
+  // /research (below) is the only route in this file that issues outbound
+  // requests to arbitrary external hosts on the operator's behalf, with the
+  // fetched URLs themselves coming from a public search index rather than
+  // being operator-typed -- an adversarial review found freddie's own
+  // website_policy rate-limit field (ratelimit_ms) is computed but never
+  // enforced by any caller, so nothing upstream throttles this. Same sliding-
+  // window bucket shape as casey's own dashboard/routes/auth.js
+  // reportRateLimited (per-key count in a fixed window, periodic sweep so the
+  // map cannot grow unbounded), keyed by operator username (this route is
+  // always authed, unlike the public /report form auth.js guards by IP) --
+  // bounds how often ANY operator can trigger external fetches through this
+  // route, independent of contributeRaw's own MAX_NOTES_PER_RUN ceiling.
+  const RESEARCH_RATE_LIMIT = 5
+  const RESEARCH_RATE_WINDOW_MS = 60000
+  const researchRateBuckets = new Map()
+  setInterval(() => {
+    const now = Date.now()
+    for (const [key, b] of researchRateBuckets) {
+      if (now - b.windowStart > RESEARCH_RATE_WINDOW_MS) researchRateBuckets.delete(key)
+    }
+  }, RESEARCH_RATE_WINDOW_MS).unref?.()
+  function researchRateLimited(req, res, next) {
+    const key = req.caseyAccount?.username || 'unknown'
+    const now = Date.now()
+    let b = researchRateBuckets.get(key)
+    if (!b || now - b.windowStart > RESEARCH_RATE_WINDOW_MS) {
+      b = { count: 0, windowStart: now }
+      researchRateBuckets.set(key, b)
+    }
+    b.count++
+    if (b.count > RESEARCH_RATE_LIMIT) return res.status(429).json({ error: 'too many research requests -- please wait a moment and try again' })
+    next()
+  }
 
   // Per-run dynamic config -- the GUI-dynamism the whole rearchitecture is
   // for. Resolves THIS run's own schema (from its stored schema blob, or
@@ -130,5 +167,89 @@ export default function mount(app, { store }) {
       data: { draft: result.draft, reviews: result.reviews, noteCount: result.noteCount, unreadableNotes: result.unreadableNotes },
     })
     res.json(result)
+  }))
+
+  // On-demand web-research trigger -- operator/dashboard-only, NEVER agent-
+  // facing (research_note/research_consolidate above stay the only
+  // contact-facing tools; this route requires an authenticated dashboard
+  // session, never reachable via casey's hardcoded enabledToolsets:['cases']
+  // contact-facing agent turn -- see AGENTS.md's "casey never geocodes or
+  // looks anything up on the model's behalf" invariant, which this
+  // deliberately does not touch).
+  //
+  // NOT gm's own oxibrowser/CDP session tooling: gm's serp/browser/cdp
+  // verbs are Claude-Code-session-local infrastructure (dispatched via
+  // .gm/exec-spool by an orchestrating agent session) with no importable
+  // API a Node server process can call -- confirmed by direct inspection
+  // of ~/.gm-tools/ and ~/.agentplug/ (local daemon binaries, not an npm
+  // package). This route instead uses freddie's OWN real, importable
+  // web_search/web_fetch primitives (plugins/tools/web/lib/*.js, a genuine
+  // peer-dependency-gated toolset already shipped in freddie, unrelated to
+  // gm) -- reachable from serpent's own server code the same way any other
+  // freddie export is. A separate `browser` primitive also exists in that
+  // same freddie plugin (puppeteer-core-based) for full page automation;
+  // not wired here since web_search+web_fetch alone already answer a
+  // research query without needing a real Chromium binary.
+  app.post('/api/runs/:id/research', researchRateLimited, wrap(async (req, res) => {
+    if (!authed(req)) return res.status(401).json({ error: 'unauthorized' })
+    const query = typeof req.body?.query === 'string' ? req.body.query.trim() : ''
+    if (!query) return res.status(400).json({ error: 'query is required' })
+    const fetchTop = Math.min(Math.max(Number(req.body?.fetchTop) || 0, 0), 5)
+    const run = await store.getCase(req.params.id)
+    if (!run) return res.status(404).json({ error: 'run not found' })
+
+    const { webSearch } = await import('freddie/plugins/tools/web/lib/search.js')
+    const { contributeRaw } = await import('freddie')
+    // A transient search-provider hiccup (DDG scrape network failure, a
+    // malformed SerpAPI response) degrades to zero results rather than
+    // failing the whole action -- consistent with the per-URL webFetch loop
+    // below, which already degrades one bad fetch to a content_error on that
+    // one result instead of aborting the others.
+    let results = []
+    let searchError = null
+    try {
+      ; ({ results } = await webSearch({ query, num_results: 10, include_content: false }))
+    } catch (e) {
+      searchError = String(e?.message || e)
+    }
+
+    if (fetchTop > 0 && results.length) {
+      const { webFetch } = await import('freddie/plugins/tools/web/lib/fetch.js')
+      for (const r of results.slice(0, fetchTop)) {
+        try {
+          const fetched = await webFetch({ url: r.url })
+          r.content = fetched?.content || null
+          r.content_error = fetched?.ok === false ? fetched.error : null
+        } catch (e) {
+          r.content = null
+          r.content_error = String(e?.message || e)
+        }
+      }
+    }
+
+    const body = [
+      `## Research: ${query}`,
+      '',
+      `Searched by ${req.caseyAccount.username} on ${new Date().toISOString()}.`,
+      searchError ? `\nSearch failed: ${searchError} (0 results)` : '',
+      '',
+      ...results.map((r, i) => [
+        `### ${i + 1}. ${r.title}`,
+        r.url,
+        '',
+        r.snippet || '',
+        r.content ? `\n<details><summary>fetched content</summary>\n\n${r.content}\n\n</details>` : '',
+        r.content_error ? `(fetch failed: ${r.content_error})` : '',
+      ].filter(Boolean).join('\n')),
+    ].join('\n')
+
+    const written = await contributeRaw({ runId: run.ref, body })
+    if (written.error) return res.status(500).json({ error: written.error })
+
+    await store.appendEvent(req.params.id, {
+      kind: 'action', actor: 'operator', text: `web research run by ${req.caseyAccount.username}: "${query}" (${results.length} results, ${fetchTop} fetched in full${searchError ? ', search failed: ' + searchError : ''})`,
+      data: { query, resultCount: results.length, fetchTop, searchError },
+    })
+    res.json({ ok: true, query, resultCount: results.length, results, searchError, noteFile: written.file })
   }))
 }

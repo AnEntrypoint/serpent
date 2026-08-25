@@ -28,11 +28,24 @@ with different schemas in the same running instance.
   concurrent run.
 - `src/dashboard-routes.js` -- serpent's own routes (per-run dynamic
   `/api/runs/:id/config`, admin-only schema-setting, on-demand
-  notes-consolidation trigger), mounted directly onto casey's real dashboard
-  Express app via `CASEY_EXTRA_DASHBOARD_ROUTES` (set in `bin/serpent.js`) --
-  same origin/port as the dashboard SPA and every other `/api/*` route, and
+  notes-consolidation trigger, on-demand web-research trigger), mounted
+  directly onto casey's real dashboard Express app via
+  `CASEY_EXTRA_DASHBOARD_ROUTES` (set in `bin/serpent.js`) -- same
+  origin/port as the dashboard SPA and every other `/api/*` route, and
   `req.caseyAccount` is already resolved by casey's own session middleware
   by the time these routes mount, so there is no separate auth system here.
+  `POST /api/runs/:id/research` (dashboard-only, requires a logged-in
+  session) runs a real web search (freddie's `web_search`/`web_fetch`
+  primitives, `plugins/tools/web/lib/*.js` -- DuckDuckGo HTML scrape or
+  SerpAPI if `SERPAPI_KEY` is set, gated by freddie's own `url_safety`/
+  `website_policy` checks) and writes the results into the run's shared
+  notes folder via `contributeRaw()` (no LLM call needed -- the content is
+  already deterministic). This is NOT gm's own oxibrowser/CDP session
+  tooling (that infrastructure is Claude-Code-session-local, with no
+  importable API a server process can call) -- it is freddie's own real,
+  already-shipped `browse` toolset, reused here as a plain library import,
+  never exposed to the contact-facing agent (which stays hardcoded to
+  `enabledToolsets: ['cases']` in casey's own `hooks/handler.js`).
 - `plugins/research-tools/` -- `research_note`/`research_consolidate` tools,
   registered under casey's `'cases'` toolset (visible to the contact-facing
   agent) wrapping freddie's `contribute()`/`consolidate()` fan-out-to-

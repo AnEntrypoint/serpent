@@ -5,3 +5,4 @@ data/
 package-lock.json
 .gm/
 .agentplug/
+.agentplug-kv/

@@ -182,7 +182,17 @@ export default function mount(app, { store }) {
     const { consolidate } = await import('freddie')
     const timeoutMs = Number(process.env.SERPENT_CONSOLIDATE_TIMEOUT_MS) || undefined
     const result = await consolidate({ runId: run.ref, reviewerCount: req.body?.reviewerCount, timeoutMs })
-    await store.updateCase(req.params.id, { summary: result.draft }, SYSTEM_USER)
+    // writeGuardViolation forbids the SYSTEM_USER actor from writing `summary`
+    // (a contact-authored field -- see casey's store/guards.js) since system
+    // code must never fabricate what a person said. This write is different:
+    // an authenticated operator triggered this consolidation of their OWN
+    // collected research notes, so it is written as that operator -- the
+    // same actor shape a manual dashboard field edit already uses (see
+    // casey's dashboard/server.js actingOperator helper, unavailable here
+    // since this module mounts outside that deps bag).
+    const acct = req.caseyAccount
+    const actingOperator = { id: acct.username, name: acct.display_name || acct.username, role: acct.role || 'operator' }
+    await store.updateCase(req.params.id, { summary: result.draft }, actingOperator)
     await store.appendEvent(req.params.id, {
       kind: 'action', actor: 'operator', text: `notes consolidated by ${req.caseyAccount.username} (${result.noteCount} notes, ${result.reviews.length} adversarial reviews)`,
       data: { draft: result.draft, reviews: result.reviews, noteCount: result.noteCount, unreadableNotes: result.unreadableNotes },

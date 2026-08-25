@@ -180,7 +180,8 @@ export default function mount(app, { store }) {
     const run = await store.getCase(req.params.id)
     if (!run) return res.status(404).json({ error: 'run not found' })
     const { consolidate } = await import('freddie')
-    const result = await consolidate({ runId: run.ref, reviewerCount: req.body?.reviewerCount })
+    const timeoutMs = Number(process.env.SERPENT_CONSOLIDATE_TIMEOUT_MS) || undefined
+    const result = await consolidate({ runId: run.ref, reviewerCount: req.body?.reviewerCount, timeoutMs })
     await store.updateCase(req.params.id, { summary: result.draft }, SYSTEM_USER)
     await store.appendEvent(req.params.id, {
       kind: 'action', actor: 'operator', text: `notes consolidated by ${req.caseyAccount.username} (${result.noteCount} notes, ${result.reviews.length} adversarial reviews)`,

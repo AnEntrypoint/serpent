@@ -101,6 +101,26 @@ export default function mount(app, { store }) {
     next()
   }
 
+  // Read side for the run's shared notes folder -- the actual research
+  // content (search results, agent-contributed notes) collected via
+  // /research and research_note has had NO dashboard surface at all until
+  // this route: casey's own case-detail view only ever rendered the report
+  // fields (hypothesis/method/etc) and the one-line audit-log summary of
+  // each research action, never the note bodies themselves. Read-only,
+  // any authed operator (matches /consolidate's own non-admin gating --
+  // viewing notes is not a structural change).
+  app.get('/api/runs/:id/notes', wrap(async (req, res) => {
+    if (!authed(req)) return res.status(401).json({ error: 'unauthorized' })
+    const run = await store.getCase(req.params.id)
+    if (!run) return res.status(404).json({ error: 'run not found' })
+    const { listNotes } = await import('freddie')
+    const notes = listNotes(run.ref)
+    res.json({
+      count: notes.length,
+      notes: notes.map(n => ({ name: n.name, text: n.text, error: n.error || null })),
+    })
+  }))
+
   // Per-run dynamic config -- the GUI-dynamism the whole rearchitecture is
   // for. Resolves THIS run's own schema (from its stored schema blob, or
   // serpent's bundled default), unlike casey's own /api/config which is

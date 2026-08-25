@@ -10,6 +10,7 @@
     "start": "node ./bin/serpent.js up"
   },
   "dependencies": {
+    "acptoapi": "github:AnEntrypoint/acptoapi#main",
     "casey": "github:AnEntrypoint/casey#main",
     "freddie": "github:AnEntrypoint/freddie#main",
     "js-yaml": "^4.3.1"

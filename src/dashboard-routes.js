@@ -38,11 +38,37 @@ export default function mount(app, { store }) {
   const authed = (req) => !!req.caseyAccount
   const isAdmin = (req) => req.caseyAccount?.role === 'admin'
 
+  // Every handler below is async and can reject (a thatcher/busybase
+  // transient failure, an optimistic-lock conflict) -- Express 4 does NOT
+  // forward a rejected async-handler promise to error middleware on its
+  // own, so an unguarded route here becomes an unhandled promise rejection.
+  // bin/worker.js installs a process-wide 'unhandledRejection' handler that
+  // treats that as fatal and crashes the ENTIRE worker (every WhatsApp/
+  // Discord contact's in-flight turn, not just this one HTTP request) --
+  // a real defect an independent adversarial review caught. wrap() is the
+  // fix: every route below is wrapped so a thrown/rejected error becomes a
+  // normal 500 JSON response instead of an unhandled rejection, and is
+  // caught HERE (before Express's own default handler) rather than
+  // reaching casey's error middleware -- that middleware is registered
+  // inside createDashboard() as the LAST step before it resolves
+  // (dashboard/server.js), strictly before CASEY_EXTRA_DASHBOARD_ROUTES
+  // mounts (bin/worker.js), so Express's stack-order semantics mean it
+  // can never catch an error from a route added afterward. Never leaking
+  // casey's own error middleware's `internal error` wording matters less
+  // than never leaking Express's own default handler's stack trace +
+  // absolute filesystem paths (casey never sets NODE_ENV=production
+  // anywhere -- dashboard/server.js's own comment), which is what an
+  // unwrapped route risks here.
+  const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
+    console.error('[serpent dashboard-routes]', req.method, req.path, e && e.stack || e)
+    if (!res.headersSent) res.status(500).json({ error: 'internal error' })
+  })
+
   // Per-run dynamic config -- the GUI-dynamism the whole rearchitecture is
   // for. Resolves THIS run's own schema (from its stored schema blob, or
   // serpent's bundled default), unlike casey's own /api/config which is
   // one process-wide answer.
-  app.get('/api/runs/:id/config', async (req, res) => {
+  app.get('/api/runs/:id/config', wrap(async (req, res) => {
     if (!authed(req)) return res.status(401).json({ error: 'unauthorized' })
     const run = await store.getCase(req.params.id)
     if (!run) return res.status(404).json({ error: 'run not found' })
@@ -52,44 +78,57 @@ export default function mount(app, { store }) {
       report_sections: shape.REPORT_SECTIONS,
       visit_critical: shape.CRITICAL_FIELDS.map(k => ({ key: k, label: shape.fieldLabel(k) })),
     })
-  })
+  }))
 
   // Admin-only schema-setting -- never agent-facing (case_report's own tool
   // schema is fixed at freddie plugin-load time; only an operator/admin
   // sets a run's custom field vocabulary, matching contact.tier's own
   // operator-assigned, never-LLM-settable invariant this extends to a new
-  // settable surface).
-  app.put('/api/runs/:id/schema', async (req, res) => {
+  // settable surface). Bounded retry-on-conflict, same expectedVersion
+  // discipline as case-store.js's own updateCaseChecked -- a dashboard
+  // write racing another dashboard write (two admins editing the same
+  // run's schema concurrently) must retry against the fresh row, never
+  // silently clobber or crash the worker (AGENTS.md: "A dashboard
+  // operator's concurrent edit is detected via optimistic locking and the
+  // merge retries against the fresh row").
+  const SCHEMA_WRITE_RETRY_LIMIT = 3
+  app.put('/api/runs/:id/schema', wrap(async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ error: 'admin only' })
     const schemaJson = typeof req.body?.schema === 'string' ? req.body.schema : JSON.stringify(req.body?.schema ?? null)
     const check = validateSchemaBlob(req.body?.schema == null ? null : schemaJson)
     if (!check.ok) return res.status(400).json({ error: check.error })
-    const run = await store.getCase(req.params.id)
+    const patch = { schema: check.parsed ? JSON.stringify(check.parsed) : '' }
+    let run = await store.getCase(req.params.id)
     if (!run) return res.status(404).json({ error: 'run not found' })
-    await store.updateCase(req.params.id, { schema: check.parsed ? JSON.stringify(check.parsed) : '' }, SYSTEM_USER)
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await store.updateCase(req.params.id, patch, SYSTEM_USER, run._version != null ? { expectedVersion: run._version } : {})
+        break
+      } catch (e) {
+        if (e.code !== 'conflict' || attempt === SCHEMA_WRITE_RETRY_LIMIT) throw e
+        run = await store.getCase(req.params.id)
+        if (!run) return res.status(404).json({ error: 'run not found' })
+      }
+    }
     await store.appendEvent(req.params.id, { kind: 'action', actor: 'operator', text: `run schema set by ${req.caseyAccount.username}`, data: { by: req.caseyAccount.username } })
     res.json({ ok: true })
-  })
+  }))
 
   // On-demand consolidation trigger -- never scheduled/automatic (matches
   // user's explicit answer). Any operator, not admin-only: consolidating
   // notes into a summary is an ordinary research action, not a structural
   // schema change.
-  app.post('/api/runs/:id/consolidate', async (req, res) => {
+  app.post('/api/runs/:id/consolidate', wrap(async (req, res) => {
     if (!authed(req)) return res.status(401).json({ error: 'unauthorized' })
     const run = await store.getCase(req.params.id)
     if (!run) return res.status(404).json({ error: 'run not found' })
-    try {
-      const { consolidate } = await import('freddie')
-      const result = await consolidate({ runId: run.ref, reviewerCount: req.body?.reviewerCount })
-      await store.updateCase(req.params.id, { summary: result.draft }, SYSTEM_USER)
-      await store.appendEvent(req.params.id, {
-        kind: 'action', actor: 'operator', text: `notes consolidated by ${req.caseyAccount.username} (${result.noteCount} notes, ${result.reviews.length} adversarial reviews)`,
-        data: { draft: result.draft, reviews: result.reviews, noteCount: result.noteCount, unreadableNotes: result.unreadableNotes },
-      })
-      res.json(result)
-    } catch (e) {
-      res.status(500).json({ error: String(e?.message || e) })
-    }
-  })
+    const { consolidate } = await import('freddie')
+    const result = await consolidate({ runId: run.ref, reviewerCount: req.body?.reviewerCount })
+    await store.updateCase(req.params.id, { summary: result.draft }, SYSTEM_USER)
+    await store.appendEvent(req.params.id, {
+      kind: 'action', actor: 'operator', text: `notes consolidated by ${req.caseyAccount.username} (${result.noteCount} notes, ${result.reviews.length} adversarial reviews)`,
+      data: { draft: result.draft, reviews: result.reviews, noteCount: result.noteCount, unreadableNotes: result.unreadableNotes },
+    })
+    res.json(result)
+  }))
 }

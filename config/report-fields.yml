@@ -6,6 +6,33 @@
 
 entity_label: run
 enquiry_headline_fields: [method, status]
+
+# Dashboard shell shape (see casey's src/store/report-shape.js's
+# DASHBOARD_UI, threaded through /api/config to app-view.js/nav-config.js).
+# serpent's whole app is a research-run dashboard, not casey's case-intake
+# tool with a per-run schema override underneath -- this rebrands the shell
+# itself and drops/relabels the sidebar nav items that only make sense for
+# casey's own field-ops/animal-health-adjacent domain (Map/Hotspots location
+# tracking, Reporters/contact-tier roster, Follow-up calls, Team workload --
+# none of these have a research-run analog). Every hidden key still exists
+# in casey's own code (hide is additive-only, config-driven), so this is a
+# per-deployment nav trim, not a fork.
+dashboard_ui:
+  brand: serpent
+  leaf: Runs
+  nav:
+    relabel:
+      new_case: New run
+      clusters: Related runs
+      export: Export runs
+    hide:
+      - geo        # Hotspots -- location-based rollup, no research-run analog
+      - map        # Map -- worker/case geolocation, no research-run analog
+      - contacts   # Reporters -- contact-tier roster, no research-run analog
+      - secretary  # Follow-up calls -- field-ops callback queue
+      - team       # Team workload -- operator assignment rollup, not yet meaningful for research runs
+    group_labels:
+      Team: Operators
 tool_name: case_report
 tool_description: >-
   Record what you have learned about this research run, one field at a time,

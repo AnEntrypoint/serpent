@@ -26,10 +26,13 @@ with different schemas in the same running instance.
   via casey's `deriveReportShape()` export, falling back to the bundled
   default. This is what makes the GUI/tool labels genuinely different per
   concurrent run.
-- `src/server.js` -- a thin research-workflow API alongside casey's own
-  dashboard (own port; reuses casey's real operator session cookie/auth):
-  per-run dynamic `/api/runs/:id/config`, admin-only schema-setting, and the
-  on-demand notes-consolidation trigger.
+- `src/dashboard-routes.js` -- serpent's own routes (per-run dynamic
+  `/api/runs/:id/config`, admin-only schema-setting, on-demand
+  notes-consolidation trigger), mounted directly onto casey's real dashboard
+  Express app via `CASEY_EXTRA_DASHBOARD_ROUTES` (set in `bin/serpent.js`) --
+  same origin/port as the dashboard SPA and every other `/api/*` route, and
+  `req.caseyAccount` is already resolved by casey's own session middleware
+  by the time these routes mount, so there is no separate auth system here.
 - `plugins/research-tools/` -- `research_note`/`research_consolidate` tools,
   registered under casey's `'cases'` toolset (visible to the contact-facing
   agent) wrapping freddie's `contribute()`/`consolidate()` fan-out-to-
